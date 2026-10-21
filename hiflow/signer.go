@@ -77,3 +77,22 @@ func newNonce() string {
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
+
+// SignParams 参与签名的请求要素。Path 为相对服务根的路径（未经 URL 编码，不含查询串）
+type SignParams struct {
+	Method        string
+	Path          string
+	Query         url.Values
+	ClientID      string
+	Timestamp     string
+	Nonce         string
+	ContentSHA256 string
+}
+
+// Sign 按 HiFlow 签名算法计算 X-Signature。IAM 实现目录接口时用它校验 HiFlow 的请求（见 iamserver 包）
+func Sign(secret string, p SignParams) string {
+	return sign(secret, stringToSign(p.Method, p.Path, p.Query, p.ClientID, p.Timestamp, p.Nonce, p.ContentSHA256))
+}
+
+// ContentSHA256 请求体的 SHA-256 小写十六进制（X-Content-SHA256）
+func ContentSHA256(body []byte) string { return hashHex(body) }

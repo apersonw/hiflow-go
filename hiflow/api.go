@@ -42,6 +42,9 @@ func (c *Client) Instances(ctx context.Context, q *InstanceQuery) (*Page[Instanc
 		set(v, "starter", q.Starter)
 		set(v, "status", q.Status)
 		set(v, "keyword", q.Keyword)
+		if q.Archived {
+			v.Set("archived", "true")
+		}
 		setInt(v, "page", int64(q.Page))
 		setInt(v, "page_size", int64(q.PageSize))
 	}
@@ -68,6 +71,16 @@ func (c *Client) Cancel(ctx context.Context, id int64, req *CancelRequest) (*Ins
 func (c *Client) Recall(ctx context.Context, id int64, operator string) (*InstanceDetail, error) {
 	var out InstanceDetail
 	if err := c.post(ctx, "/open/v1/instances/"+strconv.FormatInt(id, 10)+"/recall", map[string]string{"operator": operator}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Signal 向实例发送消息：完成等待该消息（节点 message）的接收任务，变量合并后继续推进；
+// 没有等待该消息的接收任务时返回 409（CodeConflict）
+func (c *Client) Signal(ctx context.Context, instanceID int64, req *SignalRequest) (*InstanceDetail, error) {
+	var out InstanceDetail
+	if err := c.post(ctx, "/open/v1/instances/"+strconv.FormatInt(instanceID, 10)+"/signal", req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -115,6 +128,86 @@ func (c *Client) Task(ctx context.Context, id int64) (*Task, error) {
 func (c *Client) Complete(ctx context.Context, taskID int64, req *CompleteRequest) (*InstanceDetail, error) {
 	var out InstanceDetail
 	if err := c.post(ctx, "/open/v1/tasks/"+strconv.FormatInt(taskID, 10)+"/complete", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// AddSigners 加签：会签处理中临时加人，新待办加入同一批次（依次处理时排在最后），完成条件按新的总人数计算
+func (c *Client) AddSigners(ctx context.Context, taskID int64, req *SignersRequest) (*InstanceDetail, error) {
+	var out InstanceDetail
+	if err := c.post(ctx, "/open/v1/tasks/"+strconv.FormatInt(taskID, 10)+"/add-signers", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// RemoveSigners 减签：取消会签中尚未处理的人（不能减掉自己），剩余的人已满足完成条件时节点随即结束并推进
+func (c *Client) RemoveSigners(ctx context.Context, taskID int64, req *SignersRequest) (*InstanceDetail, error) {
+	var out InstanceDetail
+	if err := c.post(ctx, "/open/v1/tasks/"+strconv.FormatInt(taskID, 10)+"/remove-signers", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Delegations 查询一页委托代理规则（最新的在前）
+func (c *Client) Delegations(ctx context.Context, q *DelegationQuery) (*Page[Delegation], error) {
+	v := url.Values{}
+	if q != nil {
+		set(v, "user", q.User)
+		set(v, "delegate", q.Delegate)
+		if q.Active {
+			v.Set("active", "true")
+		}
+		setInt(v, "page", int64(q.Page))
+		setInt(v, "page_size", int64(q.PageSize))
+	}
+	var out Page[Delegation]
+	if err := c.get(ctx, "/open/v1/delegations", v, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// CreateDelegation 设置委托代理：生效期内 User 的新待办（指定处理人与会签处理人）改由 Delegate 处理；
+// 已生成的待办不变，候选人不受影响
+func (c *Client) CreateDelegation(ctx context.Context, req *DelegationRequest) (*Delegation, error) {
+	var out Delegation
+	if err := c.post(ctx, "/open/v1/delegations", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// DeleteDelegation 删除委托代理规则（立即失效）
+func (c *Client) DeleteDelegation(ctx context.Context, id int64) error {
+	return c.del(ctx, "/open/v1/delegations/"+strconv.FormatInt(id, 10))
+}
+
+// CCs 查询一页抄送记录（最新的在前）
+func (c *Client) CCs(ctx context.Context, q *CCQuery) (*Page[CC], error) {
+	v := url.Values{}
+	if q != nil {
+		set(v, "user", q.User)
+		setInt(v, "instance_id", q.InstanceID)
+		if q.Unread {
+			v.Set("unread", "true")
+		}
+		setInt(v, "page", int64(q.Page))
+		setInt(v, "page_size", int64(q.PageSize))
+	}
+	var out Page[CC]
+	if err := c.get(ctx, "/open/v1/cc", v, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ReadCC 标记抄送已读；user 须为被抄送人
+func (c *Client) ReadCC(ctx context.Context, id int64, user string) (*CC, error) {
+	var out CC
+	if err := c.post(ctx, "/open/v1/cc/"+strconv.FormatInt(id, 10)+"/read", map[string]string{"user": user}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

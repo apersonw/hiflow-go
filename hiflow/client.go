@@ -246,6 +246,11 @@ func (c *Client) post(ctx context.Context, path string, in, out any) error {
 	return c.call(ctx, &request{method: http.MethodPost, path: path, body: b}, out)
 }
 
+// del 发送删除请求
+func (c *Client) del(ctx context.Context, path string) error {
+	return c.call(ctx, &request{method: http.MethodDelete, path: path}, nil)
+}
+
 // get 发送查询请求
 func (c *Client) get(ctx context.Context, path string, query url.Values, out any) error {
 	return c.call(ctx, &request{method: http.MethodGet, path: path, query: query}, out)

@@ -26,7 +26,9 @@ func (e *Error) Error() string {
 const (
 	CodeBadRequest = 40001
 	// CodeReturnTarget 不能退回到该节点
-	CodeReturnTarget     = 40003
+	CodeReturnTarget = 40003
+	// CodeInvalidUser 转办、加签、委托的目标用户在组织架构中不存在或已停用（目录校验为 strict）
+	CodeInvalidUser      = 40004
 	CodeMissingAuth      = 40101
 	CodeInvalidClient    = 40102
 	CodeTimestampExpired = 40103
@@ -51,6 +53,8 @@ const (
 	CodeTooManyRequests = 42901
 	CodeInternal        = 50000
 	CodeDependency      = 50003
+	// CodeCallback HiFlow 回调业务系统失败（如处理人规则解析）
+	CodeCallback = 50201
 )
 
 // IsCode 错误是否为指定业务码

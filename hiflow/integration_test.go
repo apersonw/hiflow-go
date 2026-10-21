@@ -367,7 +367,28 @@ func TestIntegrationM2(t *testing.T) {
 	if err != nil || len(in.ActiveTasks()) != 1 || in.ActiveTasks()[0].NodeID != "submit" {
 		t.Fatalf("return = %+v, %v", in.ActiveTasks(), err)
 	}
-	in, _ = c.Complete(ctx, in.ActiveTasks()[0].ID, &CompleteRequest{Operator: "u1"})
+	in, _ = c.Complete(ctx, in.ActiveTasks()[0].ID, &CompleteRequest{Operator: "u1", Comment: "已补充", CC: []string{"boss", "u1"}})
+	if len(in.CC) != 1 || in.CC[0].User != "boss" || in.CC[0].Sender != "u1" {
+		t.Fatalf("cc = %+v", in.CC)
+	}
+	ccs, err := c.CCs(ctx, &CCQuery{User: "boss", InstanceID: in.ID, Unread: true})
+	if err != nil || ccs.Total != 1 || ccs.List[0].TaskName == "" || ccs.List[0].InstanceTitle == "" {
+		t.Fatalf("ccs = %+v, %v", ccs, err)
+	}
+	if read, err := c.ReadCC(ctx, ccs.List[0].ID, "boss"); err != nil || read.ReadAt == nil {
+		t.Fatalf("read cc = %+v, %v", read, err)
+	}
+	if ccs, _ = c.CCs(ctx, &CCQuery{User: "boss", InstanceID: in.ID, Unread: true}); ccs.Total != 0 {
+		t.Fatalf("unread after read = %d", ccs.Total)
+	}
+	// 加签 s3 后再减掉，委托 s2 → d2
+	sign = in.ActiveTasks()
+	if in, err = c.AddSigners(ctx, sign[0].ID, &SignersRequest{Operator: sign[0].Assignee, Users: []string{"s3"}}); err != nil || len(in.ActiveTasks()) != 3 {
+		t.Fatalf("add signers = %+v, %v", in, err)
+	}
+	if in, err = c.RemoveSigners(ctx, sign[0].ID, &SignersRequest{Operator: sign[0].Assignee, Users: []string{"s3"}}); err != nil || len(in.ActiveTasks()) != 2 {
+		t.Fatalf("remove signers = %+v, %v", in, err)
+	}
 	for _, task := range in.ActiveTasks() {
 		in, err = c.Complete(ctx, task.ID, &CompleteRequest{Operator: task.Assignee, Variables: map[string]any{"approved": true}})
 		if err != nil {
@@ -377,5 +398,169 @@ func TestIntegrationM2(t *testing.T) {
 	result, _ := in.Variables["sign_result"].(map[string]any)
 	if in.Status != InstanceCompleted || in.Variables["approved"] != true || result["approved"] != float64(2) {
 		t.Fatalf("final = %s %v", in.Status, in.Variables)
+	}
+
+	d, err := c.CreateDelegation(ctx, &DelegationRequest{User: "u1", Delegate: "agent", DefinitionKey: "review", Reason: "休假"})
+	if err != nil || d.ID == 0 {
+		t.Fatalf("create delegation = %+v, %v", d, err)
+	}
+	in, _ = c.Start(ctx, &StartRequest{Key: "review", Starter: "u1", Variables: vars})
+	if task := in.ActiveTasks()[0]; task.Assignee != "agent" || task.DelegatedFrom != "u1" {
+		t.Fatalf("delegated task = %+v", task)
+	}
+	list, err := c.Delegations(ctx, &DelegationQuery{User: "u1", Active: true})
+	if err != nil || list.Total != 1 {
+		t.Fatalf("delegations = %+v, %v", list, err)
+	}
+	if err := c.DeleteDelegation(ctx, d.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DeleteDelegation(ctx, d.ID); !IsCode(err, CodeNotFound) {
+		t.Fatalf("delete twice: %v", err)
+	}
+}
+
+func TestIntegrationResolver(t *testing.T) {
+	ctx := context.Background()
+	var secret string
+	var ready sync.WaitGroup
+	ready.Add(1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ready.Wait()
+		CallbackHandler(secret, func(_ *http.Request, e *WebhookEvent) (any, error) {
+			if e.Type == CallbackServiceInvoke {
+				req, err := e.Service()
+				if err != nil {
+					return nil, err
+				}
+				return ServiceResponse{Variables: map[string]any{"account": req.Service + ":" + req.Params["user"].(string)}}, nil
+			}
+			req, err := e.Resolve()
+			if err != nil {
+				return nil, err
+			}
+			if req.Rule != "leader" || len(req.Args) != 1 || req.Instance.Starter != req.Args[0] {
+				return nil, fmt.Errorf("unexpected %+v", req)
+			}
+			return ResolveResponse{Users: []string{"leader-of-" + req.Args[0]}}, nil
+		}).ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	var client struct {
+		ID           int64  `json:"id"`
+		ClientID     string `json:"client_id"`
+		ClientSecret string `json:"client_secret"`
+		CallbackURL  string `json:"callback_url"`
+	}
+	_ = json.Unmarshal(admin(t, http.MethodPost, "/admin/v1/clients", map[string]any{
+		"client_name": "sdk-go-it-rules-" + time.Now().Format("150405.000"), "callback_url": srv.URL,
+	}), &client)
+	if client.CallbackURL != srv.URL {
+		t.Fatalf("callback_url = %q", client.CallbackURL)
+	}
+	secret = client.ClientSecret
+	ready.Done()
+	var m struct{ ID int64 }
+	_ = json.Unmarshal(admin(t, http.MethodPost, "/admin/v1/models", map[string]any{
+		"client_id": client.ID, "key": "rules", "name": "规则", "content": json.RawMessage(`{"nodes":[{"id":"s","type":"start"},
+			{"id":"mgr","type":"user_task","name":"上级审批","assignee":"@leader(${starter})"},
+			{"id":"svc","type":"service_task","service":{"name":"account.open","params":{"user":"${starter}"}}},
+			{"id":"wait","type":"receive_task","message":"paid"},{"id":"e","type":"end"}],
+			"edges":[{"id":"1","source":"s","target":"mgr"},{"id":"2","source":"mgr","target":"svc"},{"id":"3","source":"svc","target":"wait"},{"id":"4","source":"wait","target":"e"}]}`),
+	}), &m)
+	admin(t, http.MethodPost, fmt.Sprintf("/admin/v1/models/%d/publish", m.ID), nil)
+
+	c, err := New(baseURL(), client.ClientID, client.ClientSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := c.Start(ctx, &StartRequest{Key: "rules", Starter: "u7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task := in.ActiveTasks()[0]; task.Assignee != "leader-of-u7" {
+		t.Fatalf("assignee = %q", task.Assignee)
+	}
+	// 服务任务由服务端后台调用，接收任务等待消息
+	in, err = c.Complete(ctx, in.ActiveTasks()[0].ID, &CompleteRequest{Operator: "leader-of-u7"})
+	if err != nil || in.ActiveTasks()[0].Kind != TaskKindService {
+		t.Fatalf("service task = %+v, %v", in, err)
+	}
+	if _, err := c.Complete(ctx, in.ActiveTasks()[0].ID, &CompleteRequest{Operator: "x"}); !IsCode(err, CodeBadRequest) {
+		t.Fatalf("complete service task: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for in.ActiveTasks()[0].Kind == TaskKindService && time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+		in, _ = c.Instance(ctx, in.ID)
+	}
+	if task := in.ActiveTasks()[0]; task.Kind != TaskKindReceive || in.Variables["account"] != "account.open:u7" {
+		t.Fatalf("after service = %+v %v", task, in.Variables)
+	}
+	if _, err := c.Signal(ctx, in.ID, &SignalRequest{Message: "refund"}); !IsCode(err, CodeConflict) {
+		t.Fatalf("wrong message: %v", err)
+	}
+	if in, err = c.Signal(ctx, in.ID, &SignalRequest{Message: "paid", Variables: map[string]any{"paid": true}}); err != nil || in.Status != InstanceCompleted {
+		t.Fatalf("signal = %+v, %v", in, err)
+	}
+
+	// 签名密钥不对时回调返回 401，推进失败
+	secret = "wrong"
+	if _, err := c.Start(ctx, &StartRequest{Key: "rules", Starter: "u8"}); !IsCode(err, CodeCallback) {
+		t.Fatalf("bad callback: %v", err)
+	}
+}
+
+func TestIntegrationSubprocess(t *testing.T) {
+	c, clientPK := setupClient(t)
+	ctx := context.Background()
+	for key, content := range map[string]string{
+		"legal": `{"nodes":[{"id":"s","type":"start"},{"id":"review","type":"user_task","assignee":"${reviewer}"},{"id":"e","type":"end"}],
+			"edges":[{"id":"1","source":"s","target":"review"},{"id":"2","source":"review","target":"e"}]}`,
+		"contract": `{"nodes":[{"id":"s","type":"start"},{"id":"wait","type":"timer","timer":{"until":"${since}"}},
+			{"id":"legal","type":"subprocess","subprocess":{"key":"legal","inputs":{"reviewer":"${lawyer}"},"outputs":{"legal_ok":"approved"}}},{"id":"e","type":"end"}],
+			"edges":[{"id":"1","source":"s","target":"wait"},{"id":"2","source":"wait","target":"legal"},{"id":"3","source":"legal","target":"e"}]}`,
+	} {
+		var m struct{ ID int64 }
+		_ = json.Unmarshal(admin(t, http.MethodPost, "/admin/v1/models", map[string]any{
+			"client_id": clientPK, "key": key, "name": key, "content": json.RawMessage(content),
+		}), &m)
+		admin(t, http.MethodPost, fmt.Sprintf("/admin/v1/models/%d/publish", m.ID), nil)
+	}
+	wait := func(id int64, done func(*InstanceDetail) bool) *InstanceDetail {
+		t.Helper()
+		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(200 * time.Millisecond) {
+			in, err := c.Instance(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if done(in) || time.Now().After(deadline) {
+				return in
+			}
+		}
+	}
+	in, err := c.Start(ctx, &StartRequest{Key: "contract", Starter: "u1", Variables: map[string]any{
+		"lawyer": "l1", "since": time.Now().Add(-time.Second).Format(time.RFC3339),
+	}})
+	if err != nil || in.ActiveTasks()[0].Kind != TaskKindTimer {
+		t.Fatalf("start = %+v, %v", in, err)
+	}
+	// 定时器已到期：服务端后台推进到子流程
+	in = wait(in.ID, func(d *InstanceDetail) bool { return d.ActiveTasks()[0].Kind == TaskKindSubprocess })
+	sub := in.ActiveTasks()[0]
+	if sub.Kind != TaskKindSubprocess || sub.ChildInstanceID == nil {
+		t.Fatalf("subprocess task = %+v", sub)
+	}
+	child, _ := c.Instance(ctx, *sub.ChildInstanceID)
+	if child.ParentInstanceID == nil || *child.ParentInstanceID != in.ID || child.Depth != 1 {
+		t.Fatalf("child = %+v", child.Instance)
+	}
+	if _, err := c.Complete(ctx, child.ActiveTasks()[0].ID, &CompleteRequest{Operator: "l1", Variables: map[string]any{"approved": true}}); err != nil {
+		t.Fatal(err)
+	}
+	in = wait(in.ID, func(d *InstanceDetail) bool { return !d.Running() })
+	if in.Status != InstanceCompleted || in.Variables["legal_ok"] != true {
+		t.Fatalf("parent = %s %v", in.Status, in.Variables)
 	}
 }

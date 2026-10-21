@@ -28,6 +28,12 @@ const (
 	EventTaskReturned = "task.returned"
 	// EventTaskOverdue 待办超时（节点配置 timeout.action = remind，每个待办一次）
 	EventTaskOverdue = "task.overdue"
+	// EventTaskFailed 服务任务调用失败且重试已用尽（Comment 为失败原因），可在管理后台重试或代为完成
+	EventTaskFailed = "task.failed"
+	// EventCCCreated 产生抄送记录（每位被抄送人一个），Data.CC 为抄送信息，Data.Task 为触发抄送的任务
+	EventCCCreated = "cc.created"
+	// EventTaskAssigneeInactive 待办的处理人在组织架构中已停用或不存在（每个待办一次，之后按目录配置交接）
+	EventTaskAssigneeInactive = "task.assignee_inactive"
 	// EventWebhookTest 管理后台“测试推送”
 	EventWebhookTest = "webhook.test"
 )
@@ -71,29 +77,42 @@ type EventInstance struct {
 
 // EventTask 事件中的任务
 type EventTask struct {
-	ID          int64      `json:"id"`
-	NodeID      string     `json:"node_id"`
-	Name        string     `json:"name"`
-	Assignee    string     `json:"assignee"`
-	Candidates  []string   `json:"candidates"`
-	Status      string     `json:"status"`
-	Operator    string     `json:"operator"`
-	Comment     string     `json:"comment"`
-	CreatedAt   time.Time  `json:"created_at"`
-	CompletedAt *time.Time `json:"completed_at"`
+	ID     int64  `json:"id"`
+	NodeID string `json:"node_id"`
+	Name   string `json:"name"`
+	// Kind user | service | receive
+	Kind     string `json:"kind"`
+	Assignee string `json:"assignee"`
+	// DelegatedFrom 按委托规则交给代理人时的原处理人
+	DelegatedFrom string     `json:"delegated_from"`
+	Candidates    []string   `json:"candidates"`
+	Status        string     `json:"status"`
+	Operator      string     `json:"operator"`
+	Comment       string     `json:"comment"`
+	CreatedAt     time.Time  `json:"created_at"`
+	CompletedAt   *time.Time `json:"completed_at"`
 }
 
-// EventData 流程事件的数据：Instance 总是有，Task 只在 task.* 事件中有；Operator / Comment 为触发事件的操作者与意见
+// EventCC 事件中的抄送
+type EventCC struct {
+	ID     int64  `json:"id"`
+	User   string `json:"user"`
+	Sender string `json:"sender"`
+	NodeID string `json:"node_id"`
+}
+
+// EventData 流程事件的数据：Instance 总是有，Task 在 task.* 与 cc.created 事件中有，CC 只在 cc.created 中有；Operator / Comment 为触发事件的操作者与意见
 type EventData struct {
 	Instance EventInstance `json:"instance"`
 	Task     *EventTask    `json:"task"`
+	CC       *EventCC      `json:"cc"`
 	Operator string        `json:"operator"`
 	Comment  string        `json:"comment"`
 }
 
-// Flow 解析流程事件（instance.* / task.*）的数据
+// Flow 解析流程事件（instance.* / task.* / cc.*）的数据
 func (e *WebhookEvent) Flow() (*EventData, error) {
-	if !strings.HasPrefix(e.Type, "instance.") && !strings.HasPrefix(e.Type, "task.") {
+	if !strings.HasPrefix(e.Type, "instance.") && !strings.HasPrefix(e.Type, "task.") && !strings.HasPrefix(e.Type, "cc.") {
 		return nil, fmt.Errorf("hiflow: %s is not a flow event", e.Type)
 	}
 	var d EventData

@@ -36,12 +36,44 @@ in, err = c.Complete(ctx, todo.List[0].ID, &hiflow.CompleteRequest{
 | `Complete(ctx, taskID, req)` | 完成任务，流程继续推进 |
 | `Claim(ctx, taskID, user)` | 认领候选任务 |
 | `ReturnTargets(ctx, taskID)` / `Return(ctx, taskID, req)` | 可退回的节点 / 退回到处理过的节点 |
+| `AddSigners(ctx, taskID, req)` / `RemoveSigners(ctx, taskID, req)` | 会签加签 / 减签 |
+| `CreateDelegation(ctx, req)` / `Delegations(ctx, q)` / `DeleteDelegation(ctx, id)` | 委托代理：生效期内委托人的新待办交给代理人（`Task.DelegatedFrom` 记录委托人） |
+| `CCs(ctx, q)` / `ReadCC(ctx, id, user)` | 抄送记录（“抄送我的”、未读）/ 标记已读；处理时抄送用 `CompleteRequest.CC` |
+| `Signal(ctx, instanceID, req)` | 发送消息，推进等待该消息的接收任务 |
 | `Recall(ctx, id, operator)` | 发起人撤回（还没有任务被处理时） |
 | `Transfer(ctx, taskID, req)` | 转办 |
 
+## 待办嵌入令牌
+
+为当前登录用户签发嵌入令牌（本地计算，不请求 HiFlow），交给业务前端的[浏览器 SDK / 嵌入组件](../browser/README.md)：
+
+```go
+tok, err := client.NewEmbedToken(&hiflow.EmbedTokenOptions{User: userID, ExpiresIn: 2 * time.Hour})
+```
+
+## 处理人规则回调
+
+模型中的处理人可以写 `@leader(${starter})` 这类规则，HiFlow 推进到该节点时回调客户端的回调地址（管理后台配置）解析成用户。
+签名格式同 Webhook，密钥为客户端密钥：
+
+```go
+http.Handle("/hiflow/callback", hiflow.CallbackHandler(clientSecret, func(r *http.Request, e *hiflow.WebhookEvent) (any, error) {
+	req, err := e.Resolve() // req.Rule == "leader"，req.Args == []string{"u1"}
+	if err != nil {
+		return nil, err
+	}
+	return hiflow.ResolveResponse{Users: []string{directory.LeaderOf(req.Args[0])}}, nil
+}))
+```
+
+返回多人时作为候选人；返回零人、非 2xx 或超时时本次推进失败（`CodeCallback` / 42201）并整体回滚。
+
+服务任务（`service_task`）用同一个回调地址，`e.Type == hiflow.CallbackServiceInvoke`，用 `e.Service()` 解析，返回 `hiflow.ResolveResponse` 换成
+`hiflow.ServiceResponse{Variables: ...}`；非 2xx 时 HiFlow 退避重试，请按 `TaskID` 保证幂等。
+
 ## 接收事件（Webhook）
 
-管理后台为客户端配置 Webhook 后，HiFlow 在任务创建 / 完成 / 取消 / 指派 / 退回 / 超时、实例发起 / 结束 / 取消时推送事件（签名、失败退避重试、至少投递一次）：
+管理后台为客户端配置 Webhook 后，HiFlow 在任务创建 / 完成 / 取消 / 指派 / 退回 / 超时、抄送、实例发起 / 结束 / 取消时推送事件（签名、失败退避重试、至少投递一次）：
 
 ```go
 http.Handle("/hiflow/events", hiflow.WebhookHandler(os.Getenv("HIFLOW_WEBHOOK_SECRET"), func(r *http.Request, e *hiflow.WebhookEvent) error {
@@ -66,6 +98,24 @@ http.Handle("/hiflow/events", hiflow.WebhookHandler(os.Getenv("HIFLOW_WEBHOOK_SE
 - 查询（GET）在网络错误、429、502、503、504 时自动重试 2 次（`WithRetries` 调整），每次重新签名；发起、完成等写操作不自动重试。
 - 本地时钟与服务端偏差超过 5 分钟时，按服务端时间自动校准后重试一次。
 - `Client` 可并发使用，建议全局复用。
+
+## 组织架构目录接口（IAM 侧服务端骨架）
+
+IAM 团队实现 HiFlow 目录接口（规范 docs/iam-api.yaml）时，用 `iamserver` 包只需实现几个查询方法，签名校验、路由、参数校验、能力声明与错误格式由骨架处理：
+
+```go
+type myDirectory struct{ db *sql.DB }
+
+func (d myDirectory) User(ctx context.Context, id string) (*iamserver.User, error)            { /* 不存在返回 iamserver.ErrNotFound */ }
+func (d myDirectory) BatchUsers(ctx context.Context, ids []string) ([]iamserver.User, error)  { /* 不存在的 ID 不返回 */ }
+// 按需实现 Managers、Departments、Roles、Searcher 接口，能力声明自动生成
+
+h := iamserver.New(myDirectory{db}, iamserver.Options{DirectoryID: "hfdir_xxx", Secret: os.Getenv("HIFLOW_DIRECTORY_SECRET")})
+http.Handle("/hiflow/v1/", http.StripPrefix("/hiflow/v1", h)) // 签名中的 Path 相对基础地址，须去掉前缀
+```
+
+`iamserver.Static` 是内存中的完整实现（也是各方法语义的参考），示例见 [examples/iamserver](examples/iamserver/main.go)。
+多实例部署时把 `Options.Nonces` 换成共享存储。对接完成后用 HiFlow 的 `tools/iamcheck` 或管理后台“测试连接”做契约自检。
 
 ## 测试
 
