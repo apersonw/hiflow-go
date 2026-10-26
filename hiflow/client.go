@@ -80,6 +80,8 @@ type request struct {
 	path   string // 服务端路径，如 /open/v1/instances
 	query  url.Values
 	body   []byte // JSON 请求体，nil 表示无请求体
+	// idempotent 写操作可安全重试（如带幂等键的发起）
+	idempotent bool
 }
 
 func (c *Client) newHTTPRequest(ctx context.Context, r *request) (*http.Request, error) {
@@ -119,11 +121,11 @@ func retryableStatus(code int) bool {
 // maxRetryAfter 服务端 Retry-After 的等待上限
 const maxRetryAfter = 30 * time.Second
 
-// send 发送请求：GET 按配置重试，每次重新签名；时间戳超窗时校准时钟后立即重试一次
+// send 发送请求：GET 与幂等的写操作按配置重试，每次重新签名；时间戳超窗时校准时钟后立即重试一次
 // （超窗的请求服务端在验签前就拒绝了，重试写操作也不会重复执行）
 func (c *Client) send(ctx context.Context, r *request) (*http.Response, error) {
 	attempts := 1
-	if r.method == http.MethodGet {
+	if r.method == http.MethodGet || r.idempotent {
 		attempts += c.retries
 	}
 	var (

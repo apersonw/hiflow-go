@@ -34,6 +34,8 @@ const (
 	EventCCCreated = "cc.created"
 	// EventTaskAssigneeInactive 待办的处理人在组织架构中已停用或不存在（每个待办一次，之后按目录配置交接）
 	EventTaskAssigneeInactive = "task.assignee_inactive"
+	// EventTaskUrged 发起人催办（每个被催办的待办一条，Comment 为催办说明），由业务系统通知处理人
+	EventTaskUrged = "task.urged"
 	// EventWebhookTest 管理后台“测试推送”
 	EventWebhookTest = "webhook.test"
 )
@@ -73,6 +75,8 @@ type EventInstance struct {
 	StartedAt         time.Time  `json:"started_at"`
 	EndedAt           *time.Time `json:"ended_at"`
 	EndReason         string     `json:"end_reason"`
+	// Result 审批结果（结束节点声明的 result），未声明时为空
+	Result string `json:"result"`
 }
 
 // EventTask 事件中的任务

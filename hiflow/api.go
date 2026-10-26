@@ -2,6 +2,9 @@ package hiflow
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 )
@@ -15,10 +18,25 @@ func (c *Client) Definition(ctx context.Context, key string) (*Definition, error
 	return &out, nil
 }
 
-// Start 发起流程实例，返回实例详情（含发起后生成的待办）
+// StartForm 流程最新版本的发起表单（字段、权限与默认值），业务前端据此渲染发起页；模型没有定义表单时 Form 为 nil
+func (c *Client) StartForm(ctx context.Context, key string) (*StartForm, error) {
+	var out StartForm
+	if err := c.get(ctx, "/open/v1/definitions/"+url.PathEscape(key)+"/start-form", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Start 发起流程实例，返回实例详情（含发起后生成的待办）。设置了 IdempotencyKey 时失败可安全重试（SDK 自动重试），
+// 重复请求返回已发起的实例；同一个键已用于其他流程时返回 CodeConflict
 func (c *Client) Start(ctx context.Context, req *StartRequest) (*InstanceDetail, error) {
+	b, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("hiflow: encode request: %w", err)
+	}
 	var out InstanceDetail
-	if err := c.post(ctx, "/open/v1/instances", req, &out); err != nil {
+	r := &request{method: http.MethodPost, path: "/open/v1/instances", body: b, idempotent: req != nil && req.IdempotencyKey != ""}
+	if err := c.call(ctx, r, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -41,6 +59,7 @@ func (c *Client) Instances(ctx context.Context, q *InstanceQuery) (*Page[Instanc
 		set(v, "business_key", q.BusinessKey)
 		set(v, "starter", q.Starter)
 		set(v, "status", q.Status)
+		set(v, "result", q.Result)
 		set(v, "keyword", q.Keyword)
 		if q.Archived {
 			v.Set("archived", "true")
@@ -67,10 +86,31 @@ func (c *Client) Cancel(ctx context.Context, id int64, req *CancelRequest) (*Ins
 	return &out, nil
 }
 
-// Recall 发起人撤回：还没有任何任务被处理时，operator 须为实例的发起人（否则 CodeNotAssignee；已有任务处理过为 CodeRecallNotAllowed）
+// Recall 发起人撤回：还没有其他人处理过任务（发起人自己完成的不算）或已被退回到发起人时可撤回，operator 须为实例的发起人
+// （否则 CodeNotAssignee；不满足撤回条件为 CodeRecallNotAllowed）
 func (c *Client) Recall(ctx context.Context, id int64, operator string) (*InstanceDetail, error) {
 	var out InstanceDetail
 	if err := c.post(ctx, "/open/v1/instances/"+strconv.FormatInt(id, 10)+"/recall", map[string]string{"operator": operator}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// RecallToStarter 发起人撤回到自己重新提交：撤回条件同 Recall，实例不结束——进行中的待办取消、并行分支作废，
+// 发起人得到“重新提交”待办（在开始节点上），修改表单后完成它即从头重新推进
+func (c *Client) RecallToStarter(ctx context.Context, id int64, operator string) (*InstanceDetail, error) {
+	var out InstanceDetail
+	if err := c.post(ctx, "/open/v1/instances/"+strconv.FormatInt(id, 10)+"/recall", map[string]string{"operator": operator, "mode": "resubmit"}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Urge 发起人催办实例中进行中的人工待办：每个待办推送 Webhook task.urged，由业务系统通知处理人。
+// 距上次催办不足服务端最小间隔的待办跳过（UrgeResult.Skipped）；全部跳过时返回 CodeTooManyRequests，没有可催办的待办时返回 CodeNothingToUrge
+func (c *Client) Urge(ctx context.Context, id int64, operator, comment string) (*UrgeResult, error) {
+	var out UrgeResult
+	if err := c.post(ctx, "/open/v1/instances/"+strconv.FormatInt(id, 10)+"/urge", map[string]string{"operator": operator, "comment": comment}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -81,6 +121,22 @@ func (c *Client) Recall(ctx context.Context, id int64, operator string) (*Instan
 func (c *Client) Signal(ctx context.Context, instanceID int64, req *SignalRequest) (*InstanceDetail, error) {
 	var out InstanceDetail
 	if err := c.post(ctx, "/open/v1/instances/"+strconv.FormatInt(instanceID, 10)+"/signal", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SendMessage 发送消息（快递状态推送等）：按实例 ID 或业务主键找到等待该消息的实例并投递；
+// 带 MessageID 时去重（重复返回 MessageDuplicate，失败可安全重试），带 TTL 时暂时无人等待的消息会缓存（MessageBuffered）。
+// 同一业务主键有多个实例在等待时返回 CodeConflict，请指定 Key 或 InstanceID
+func (c *Client) SendMessage(ctx context.Context, req *MessageRequest) (*MessageResult, error) {
+	b, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("hiflow: encode request: %w", err)
+	}
+	var out MessageResult
+	r := &request{method: http.MethodPost, path: "/open/v1/messages", body: b, idempotent: req != nil && req.MessageID != ""}
+	if err := c.call(ctx, r, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -244,6 +300,19 @@ func (c *Client) Return(ctx context.Context, taskID int64, req *ReturnRequest) (
 func (c *Client) Transfer(ctx context.Context, taskID int64, req *TransferRequest) (*Task, error) {
 	var out Task
 	if err := c.post(ctx, "/open/v1/tasks/"+strconv.FormatInt(taskID, 10)+"/transfer", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// TransferInstance 转办，返回实例详情（与 Complete、Return 等一致）；Transfer 返回任务本身
+func (c *Client) TransferInstance(ctx context.Context, taskID int64, req *TransferRequest) (*InstanceDetail, error) {
+	body := struct {
+		*TransferRequest
+		ReturnInstance bool `json:"return_instance"`
+	}{req, true}
+	var out InstanceDetail
+	if err := c.post(ctx, "/open/v1/tasks/"+strconv.FormatInt(taskID, 10)+"/transfer", body, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

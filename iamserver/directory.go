@@ -1,6 +1,9 @@
 package iamserver
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Directory 必须实现：按 ID 查询用户（含停用用户）。不存在时返回 ErrNotFound
 type Directory interface {
@@ -34,4 +37,14 @@ type Roles interface {
 // Searcher 可选：按姓名或账号搜索在职用户（能力 search），departmentID 非空时限定部门（含下级）
 type Searcher interface {
 	SearchUsers(ctx context.Context, keyword, departmentID string, page PageRequest) (*Page[User], error)
+}
+
+// Syncer 可选：导出接口（能力 sync，规范 1.1），HiFlow 据此维护只读的组织快照，在 IAM 长时间不可用时仍能解析处理人规则。
+// since 为零值时全量导出（不含墓碑）；否则只返回此后（含该时刻）有变化的记录，已删除的返回墓碑。
+// 每一页的 AsOf 为导出开始时的时间（翻页时保持不变），HiFlow 下次以它为 since。
+// SyncDepartments / SyncRoles 只在同时实现了 Departments / Roles 时被调用
+type Syncer interface {
+	SyncUsers(ctx context.Context, since time.Time, page PageRequest) (*SyncPage[SyncUser], error)
+	SyncDepartments(ctx context.Context, since time.Time, page PageRequest) (*SyncPage[SyncDepartment], error)
+	SyncRoles(ctx context.Context, since time.Time, page PageRequest) (*SyncPage[SyncRole], error)
 }

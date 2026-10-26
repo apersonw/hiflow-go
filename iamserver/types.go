@@ -12,10 +12,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 )
 
 // SpecVersion 实现的规范版本
-const SpecVersion = "1.0"
+const SpecVersion = "1.1"
 
 // 默认值与上限（与规范一致）
 const (
@@ -59,6 +60,36 @@ type Role struct {
 type Manager struct {
 	Level int  `json:"level"`
 	User  User `json:"user"`
+}
+
+// SyncUser 导出的用户（含停用）与直属上级；Deleted 为墓碑（只需 ID 与 UpdatedAt）
+type SyncUser struct {
+	User
+	ManagerID string    `json:"manager_id"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Deleted   bool      `json:"deleted,omitempty"`
+}
+
+// SyncDepartment 导出的部门
+type SyncDepartment struct {
+	Department
+	UpdatedAt time.Time `json:"updated_at"`
+	Deleted   bool      `json:"deleted,omitempty"`
+}
+
+// SyncRole 导出的角色与全部成员（含停用）；角色或成员变化都应更新 UpdatedAt
+type SyncRole struct {
+	Role
+	MemberIDs []string  `json:"member_ids"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Deleted   bool      `json:"deleted,omitempty"`
+}
+
+// SyncPage 导出的一页：AsOf 为导出开始时的时间，翻页时每页相同（可编码进 NextPageToken，见 SyncPaginate）
+type SyncPage[T any] struct {
+	Items         []T       `json:"items"`
+	NextPageToken string    `json:"next_page_token"`
+	AsOf          time.Time `json:"as_of"`
 }
 
 // PageRequest 分页参数：Size 已校验（1 ~ 500，默认 100），Token 为上一页返回的 NextPageToken（首页为空）

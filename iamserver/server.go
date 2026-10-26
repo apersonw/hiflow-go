@@ -60,6 +60,7 @@ type features struct {
 	RecursiveMembers    bool `json:"recursive_members"`
 	Roles               bool `json:"roles"`
 	RoleDepartmentScope bool `json:"role_department_scope"`
+	Sync                bool `json:"sync"`
 }
 
 type capabilities struct {
@@ -93,6 +94,7 @@ func New(dir Directory, opt Options) http.Handler {
 	_, s.caps.Features.Departments = dir.(Departments)
 	_, s.caps.Features.Roles = dir.(Roles)
 	_, s.caps.Features.Search = dir.(Searcher)
+	_, s.caps.Features.Sync = dir.(Syncer)
 	s.caps.Features.RecursiveMembers = s.caps.Features.Departments && opt.RecursiveMembers
 	s.caps.Features.RoleDepartmentScope = s.caps.Features.Roles && opt.RoleDepartmentScope
 	s.caps.SpecVersion, s.caps.Provider, s.caps.MaxBatchSize = SpecVersion, opt.Provider, opt.MaxBatchSize
@@ -223,6 +225,32 @@ func (s *server) handle(r *http.Request) (any, error) {
 			return nil, err
 		}
 		return nonNilPage(s.dir.(Roles).RoleMembers(ctx, segs[1], dept, p))
+	case get && route(2, "sync"):
+		kind := segs[1]
+		if !f.Sync || (kind == "departments" && !f.Departments) || (kind == "roles" && !f.Roles) {
+			return nil, notImplemented
+		}
+		var since time.Time
+		if v := q.Get("updated_since"); v != "" {
+			t, err := time.Parse(time.RFC3339Nano, v)
+			if err != nil {
+				return nil, BadRequest("updated_since 需为 RFC 3339 时间")
+			}
+			since = t
+		}
+		p, err := page()
+		if err != nil {
+			return nil, err
+		}
+		sy := s.dir.(Syncer)
+		switch kind {
+		case "users":
+			return nonNilSync(sy.SyncUsers(ctx, since, p))
+		case "departments":
+			return nonNilSync(sy.SyncDepartments(ctx, since, p))
+		case "roles":
+			return nonNilSync(sy.SyncRoles(ctx, since, p))
+		}
 	}
 	return nil, NotFound("接口不存在：%s %s", r.Method, r.URL.Path)
 }
@@ -247,6 +275,22 @@ func nonNilPage[T any](p *Page[T], err error) (any, error) {
 	}
 	if p.Items == nil {
 		p.Items = []T{}
+	}
+	return p, nil
+}
+
+func nonNilSync[T any](p *SyncPage[T], err error) (any, error) {
+	if err != nil {
+		return nil, err
+	}
+	if p == nil {
+		p = &SyncPage[T]{}
+	}
+	if p.Items == nil {
+		p.Items = []T{}
+	}
+	if p.AsOf.IsZero() {
+		return nil, &Error{Status: http.StatusInternalServerError, Code: CodeInternal, Message: "导出结果缺少 as_of"}
 	}
 	return p, nil
 }

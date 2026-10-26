@@ -29,6 +29,7 @@ in, err = c.Complete(ctx, todo.List[0].ID, &hiflow.CompleteRequest{
 | 方法 | 说明 |
 |---|---|
 | `Definition(ctx, key)` | 流程定义的最新版本（含流程图） |
+| `StartForm(ctx, key)` | 发起表单：开始节点上的字段、权限与默认值（模型没有定义表单时 `Form` 为 nil）；任务详情 `Task(ctx, id)` 的 `Form` 为本节点的表单与当前值，提交不合法时为 `CodeInvalidForm` |
 | `Start(ctx, req)` | 发起流程，返回实例详情（含生成的待办） |
 | `Instance(ctx, id)` / `Instances(ctx, q)` | 实例详情（含任务与轨迹）/ 分页查询 |
 | `Cancel(ctx, id, req)` | 撤回 / 终止实例，进行中的任务一并取消 |

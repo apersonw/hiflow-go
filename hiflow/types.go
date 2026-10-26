@@ -59,6 +59,8 @@ type Instance struct {
 	StartedAt         time.Time      `json:"started_at"`
 	EndedAt           *time.Time     `json:"ended_at"`
 	EndReason         string         `json:"end_reason"`
+	// Result 审批结果：最后到达的、声明了 result 的结束节点的结果（如 approved、rejected），模型未声明时为空
+	Result string `json:"result"`
 	// 作为子流程发起时：父实例、父实例中的子流程任务与嵌套层数（顶层为 0）
 	ParentInstanceID *int64 `json:"parent_instance_id"`
 	ParentTaskID     *int64 `json:"parent_task_id"`
@@ -121,6 +123,8 @@ type Task struct {
 	LastError string     `json:"last_error,omitempty"`
 	// ChildInstanceID 子流程任务发起的子实例
 	ChildInstanceID *int64 `json:"child_instance_id,omitempty"`
+	// ResumeNode 退回时选择了“处理后直接回到退回人”：本待办处理后回到的节点
+	ResumeNode string `json:"resume_node,omitempty"`
 	// Overdue 进行中且已超时（任务列表与详情中返回）
 	Overdue bool `json:"overdue,omitempty"`
 
@@ -130,13 +134,79 @@ type Task struct {
 	DefinitionName string `json:"definition_name,omitempty"`
 	BusinessKey    string `json:"business_key,omitempty"`
 	Starter        string `json:"starter,omitempty"`
+	// Form 本节点的表单视图（只在任务详情 Client.Task 中返回；模型没有定义表单时为 nil）
+	Form *FormView `json:"form,omitempty"`
+}
+
+// 表单字段权限
+const (
+	PermEdit = "edit"
+	PermRead = "read"
+)
+
+// FormView 某个节点上的表单：字段、本节点的权限与当前值（隐藏的字段不返回）。
+// 提交时只传可编辑的字段；类型、必填或权限不符时返回 CodeInvalidForm
+type FormView struct {
+	NodeID string      `json:"node_id"`
+	Fields []FormField `json:"fields"`
+}
+
+// FormField 表单字段（Key 即流程变量名）
+type FormField struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+	// Type text / textarea / number / boolean / date（2006-01-02）/ datetime（RFC 3339）/ select / multiselect / user / users /
+	// file / files（附件，值为 FileValue / []FileValue）
+	Type string `json:"type"`
+	// Required 本节点必须有值
+	Required    bool         `json:"required,omitempty"`
+	Options     []FormOption `json:"options,omitempty"`
+	Default     any          `json:"default,omitempty"`
+	Placeholder string       `json:"placeholder,omitempty"`
+	Help        string       `json:"help,omitempty"`
+	// Min / Max number 为取值范围，text / textarea 为字数，multiselect / users / files 为个数
+	Min     *float64 `json:"min,omitempty"`
+	Max     *float64 `json:"max,omitempty"`
+	Pattern string   `json:"pattern,omitempty"`
+	// Accept / MaxSize 附件允许的文件类型（扩展名或 MIME 类型，逗号分隔）与单个文件大小上限（字节）
+	Accept  string `json:"accept,omitempty"`
+	MaxSize int64  `json:"max_size,omitempty"`
+	// Permission 本节点的权限：PermEdit 或 PermRead
+	Permission string `json:"permission"`
+	// Value 当前值（发起表单为默认值）
+	Value any `json:"value,omitempty"`
+}
+
+// FileValue 附件字段的值：文件由业务系统自己存储（HiFlow 不接入任何文件服务），ID 为业务系统的文件标识；带 Size / Type 时服务端按字段的 MaxSize / Accept 校验
+type FileValue struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Size int64  `json:"size,omitempty"`
+	Type string `json:"type,omitempty"`
+	URL  string `json:"url,omitempty"`
+}
+
+// FormOption 单选 / 多选的选项
+type FormOption struct {
+	Value string `json:"value"`
+	Label string `json:"label,omitempty"`
+}
+
+// StartForm 发起表单
+type StartForm struct {
+	DefinitionID int64     `json:"definition_id"`
+	Key          string    `json:"key"`
+	Version      int       `json:"version"`
+	Name         string    `json:"name"`
+	Form         *FormView `json:"form"`
 }
 
 // Event 流程轨迹
 type Event struct {
 	ID int64 `json:"id"`
 	// Type instance_started | node_entered | task_created | task_completed | task_canceled | task_transferred | task_returned
-	// | task_overdue | cc | signers_added | signers_removed | service_failed | instance_completed | instance_canceled | instance_recalled
+	// | task_overdue | task_auto_passed（按模型的自动通过规则直接通过，Operator 为处理人）| cc | signers_added | signers_removed
+	// | service_failed | node_skipped | instance_completed | instance_canceled | instance_recalled
 	Type      string    `json:"type"`
 	TaskID    *int64    `json:"task_id"`
 	NodeID    string    `json:"node_id"`
@@ -161,6 +231,9 @@ type StartRequest struct {
 	Version int `json:"version,omitempty"`
 	// BusinessKey 业务主键（如请假单号），便于反查实例
 	BusinessKey string `json:"business_key,omitempty"`
+	// IdempotencyKey 幂等键（可选，最长 128 位，如 "leave:" + 请假单号）：同一客户端下相同的键只发起一次，重复请求返回已发起的实例。
+	// 设置后 Start 在网络错误、429 / 5xx 时按客户端的重试配置自动重试
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 	// Title 实例标题，为空时使用流程名称
 	Title   string `json:"title,omitempty"`
 	Starter string `json:"starter,omitempty"`
@@ -168,17 +241,31 @@ type StartRequest struct {
 	Variables map[string]any `json:"variables,omitempty"`
 }
 
-// ReturnRequest 退回到本实例中处理过的人工任务节点（可选节点见 ReturnTargets）
+// UrgeResult 催办结果
+type UrgeResult struct {
+	InstanceID int64 `json:"instance_id"`
+	// Urged 本次催办的待办；Skipped 距上次催办不足最小间隔而跳过的待办
+	Urged   []int64 `json:"urged"`
+	Skipped []int64 `json:"skipped"`
+}
+
+// ReturnRequest 退回到本实例中处理过的人工任务节点，或开始节点（退回发起人重新提交）；可选节点见 ReturnTargets
 type ReturnRequest struct {
 	Operator   string `json:"operator"`
 	TargetNode string `json:"target_node"`
 	Comment    string `json:"comment,omitempty"`
+	// DirectBack 处理后直接回到退回人所在的节点，不再按模型重走中间的节点（ReturnTarget.DirectBack 为 true 的目标才可以）
+	DirectBack bool `json:"direct_back,omitempty"`
 }
 
 // ReturnTarget 可退回的节点
 type ReturnTarget struct {
-	NodeID      string    `json:"node_id"`
-	Name        string    `json:"name"`
+	NodeID string `json:"node_id"`
+	Name   string `json:"name"`
+	// Starter 目标为开始节点：退回发起人，生成发起人的“重新提交”待办
+	Starter bool `json:"starter"`
+	// DirectBack 可以选择处理后直接回到退回人（与退回人在同一分支内）
+	DirectBack  bool      `json:"direct_back"`
 	Operator    string    `json:"operator"`
 	CompletedAt time.Time `json:"completed_at"`
 }
@@ -200,6 +287,43 @@ type SignalRequest struct {
 	// Operator 记为接收任务的处理人，默认 system
 	Operator  string         `json:"operator,omitempty"`
 	Variables map[string]any `json:"variables,omitempty"`
+	// MessageID 消息 ID（如快递公司推送 ID）：同一客户端内相同 ID 只处理一次
+	MessageID string `json:"message_id,omitempty"`
+	// TTL 暂时没有等待该消息的节点时缓存的秒数（最长 30 天），实例走到该节点后自动投递；0 不缓存（返回 CodeConflict）
+	TTL int `json:"ttl,omitempty"`
+}
+
+// MessageRequest 发送消息：按实例 ID 或业务主键（如快递单号，Key 可限定流程）找到等待该消息的实例
+type MessageRequest struct {
+	InstanceID  int64  `json:"instance_id,omitempty"`
+	BusinessKey string `json:"business_key,omitempty"`
+	// Key 限定流程（同一业务主键有多个流程的实例时）
+	Key     string `json:"key,omitempty"`
+	Message string `json:"message"`
+	// MessageID 消息 ID：同一客户端内相同 ID 只处理一次（重复时 Status 为 MessageDuplicate）；设置后 SendMessage 失败时自动重试
+	MessageID string `json:"message_id,omitempty"`
+	// TTL 暂时没有等待该消息的节点时缓存的秒数（最长 30 天）；0 不缓存（返回 CodeConflict）
+	TTL       int            `json:"ttl,omitempty"`
+	Operator  string         `json:"operator,omitempty"`
+	Variables map[string]any `json:"variables,omitempty"`
+}
+
+// 消息的处理结果
+const (
+	MessageDelivered = "delivered"
+	MessageBuffered  = "buffered"
+	MessageDuplicate = "duplicate"
+)
+
+// MessageResult 发送消息的结果
+type MessageResult struct {
+	// Status delivered 已投递、buffered 已缓存等待投递、duplicate 同一 message_id 已处理过
+	Status     string `json:"status"`
+	InstanceID int64  `json:"instance_id,omitempty"`
+	TaskID     int64  `json:"task_id,omitempty"`
+	MessageID  string `json:"message_id,omitempty"`
+	// Instance 投递后的实例详情（只在 delivered 时返回）
+	Instance *InstanceDetail `json:"instance,omitempty"`
 }
 
 // SignersRequest 加签 / 减签（只适用于会签等多实例任务）
@@ -297,7 +421,9 @@ type InstanceQuery struct {
 	BusinessKey string
 	Starter     string
 	// Status running | completed | canceled
-	Status  string
+	Status string
+	// Result 审批结果（结束节点声明的 result，如 approved、rejected）
+	Result  string
 	Keyword string
 	// Archived 查询已归档的实例（服务端开启归档后，结束较久的实例只在归档中）
 	Archived bool

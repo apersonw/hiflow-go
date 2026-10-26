@@ -28,7 +28,9 @@ const (
 	// CodeReturnTarget 不能退回到该节点
 	CodeReturnTarget = 40003
 	// CodeInvalidUser 转办、加签、委托的目标用户在组织架构中不存在或已停用（目录校验为 strict）
-	CodeInvalidUser      = 40004
+	CodeInvalidUser = 40004
+	// CodeInvalidForm 提交的表单字段类型不对、必填未填或在本节点不可修改
+	CodeInvalidForm      = 40005
 	CodeMissingAuth      = 40101
 	CodeInvalidClient    = 40102
 	CodeTimestampExpired = 40103
@@ -47,7 +49,9 @@ const (
 	CodeDefinitionSuspended = 40904
 	// CodeRecallNotAllowed 已有任务被处理，不能撤回
 	CodeRecallNotAllowed = 40905
-	CodePayloadTooLarge  = 41301
+	// CodeNothingToUrge 实例中没有进行中的人工待办可催办
+	CodeNothingToUrge   = 40906
+	CodePayloadTooLarge = 41301
 	// CodeEvaluate 流程推进失败（排他网关没有满足条件的出口等），通常是流程变量缺失
 	CodeEvaluate        = 42201
 	CodeTooManyRequests = 42901

@@ -222,3 +222,47 @@ func TestMinimalDirectory(t *testing.T) {
 		t.Errorf("internal error = %d %v %v", st, b, logged)
 	}
 }
+
+func TestSyncExport(t *testing.T) {
+	e := newEnv(t, NewStatic(testData()), Options{})
+	var ids []string
+	asOf, token := "", ""
+	for i := 0; i < 10; i++ {
+		q := url.Values{"page_size": {"2"}}
+		if token != "" {
+			q.Set("page_token", token)
+		}
+		st, page := e.call("GET", "/sync/users", q, nil, nil)
+		if st != 200 {
+			t.Fatalf("sync users = %d %v", st, page)
+		}
+		if asOf == "" {
+			asOf = page["as_of"].(string)
+		} else if page["as_of"] != asOf {
+			t.Fatalf("as_of changed across pages: %v vs %v", page["as_of"], asOf)
+		}
+		for _, it := range page["items"].([]any) {
+			ids = append(ids, it.(map[string]any)["id"].(string))
+		}
+		if token, _ = page["next_page_token"].(string); token == "" {
+			break
+		}
+	}
+	// 含停用用户 mgr
+	if fmt.Sprint(ids) != "[ceo mgr u1 u2 u3]" {
+		t.Fatalf("exported users = %v", ids)
+	}
+	// 以 as_of 之后为起点的增量：内存数据没有变化
+	later := time.Now().Add(time.Second).UTC().Format(time.RFC3339)
+	if _, page := e.call("GET", "/sync/users", url.Values{"updated_since": {later}}, nil, nil); len(page["items"].([]any)) != 0 {
+		t.Fatalf("incremental = %v", page)
+	}
+	if st, b := e.call("GET", "/sync/users", url.Values{"updated_since": {"yesterday"}}, nil, nil); st != 400 || b["code"] != CodeBadRequest {
+		t.Fatalf("bad updated_since = %d %v", st, b)
+	}
+	_, roles := e.call("GET", "/sync/roles", nil, nil, nil)
+	r := roles["items"].([]any)[0].(map[string]any)
+	if len(r["member_ids"].([]any)) != 3 {
+		t.Fatalf("role members should include disabled ones: %v", r)
+	}
+}

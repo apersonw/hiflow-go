@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -164,6 +165,26 @@ func TestIntegration(t *testing.T) {
 		}
 		if list, _ := c.Instances(ctx, &InstanceQuery{BusinessKey: "L-1"}); list.Total != 1 {
 			t.Fatalf("instances by business key = %d", list.Total)
+		}
+	})
+
+	t.Run("idempotent start, transfer with detail, recall to starter", func(t *testing.T) {
+		req := &StartRequest{Key: "leave", Starter: "u3", IdempotencyKey: "leave:L-idem-" + strconv.FormatInt(time.Now().UnixNano(), 36), Variables: map[string]any{"manager": "boss", "days": 1}}
+		first, err := c.Start(ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		again, err := c.Start(ctx, req)
+		if err != nil || again.ID != first.ID {
+			t.Fatalf("repeat start = %+v, %v", again, err)
+		}
+		in, err := c.TransferInstance(ctx, first.ActiveTasks()[0].ID, &TransferRequest{Operator: "boss", To: "boss2"})
+		if err != nil || in.ID != first.ID || in.ActiveTasks()[0].Assignee != "boss2" {
+			t.Fatalf("transfer instance = %+v, %v", in, err)
+		}
+		in, err = c.RecallToStarter(ctx, in.ID, "u3")
+		if err != nil || in.Status != InstanceRunning || len(in.ActiveTasks()) != 1 || in.ActiveTasks()[0].Assignee != "u3" {
+			t.Fatalf("recall to starter = %+v, %v", in, err)
 		}
 	})
 
@@ -349,15 +370,13 @@ func TestIntegrationM2(t *testing.T) {
 	// 会签中 s1 退回到提交，重新提交后会签通过
 	in, _ = c.Start(ctx, &StartRequest{Key: "review", Starter: "u1", Variables: vars})
 	in, _ = c.Complete(ctx, in.ActiveTasks()[0].ID, &CompleteRequest{Operator: "u1"})
-	if _, err := c.Recall(ctx, in.ID, "u1"); !IsCode(err, CodeRecallNotAllowed) {
-		t.Fatalf("recall after submit: %v", err)
-	}
 	sign := in.ActiveTasks()
 	if len(sign) != 2 || sign[0].MultiKey == "" || sign[0].MultiKey != sign[1].MultiKey {
 		t.Fatalf("countersign tasks = %+v", sign)
 	}
 	targets, err := c.ReturnTargets(ctx, sign[0].ID)
-	if err != nil || len(targets) != 1 || targets[0].NodeID != "submit" || targets[0].Operator != "u1" {
+	// 处理过的“提交”与开始节点（退回发起人）
+	if err != nil || len(targets) != 2 || targets[0].NodeID != "submit" || targets[0].Operator != "u1" || !targets[1].Starter {
 		t.Fatalf("return targets = %+v, %v", targets, err)
 	}
 	if _, err := c.Return(ctx, sign[0].ID, &ReturnRequest{Operator: sign[0].Assignee, TargetNode: "sign"}); !IsCode(err, CodeReturnTarget) {
@@ -389,10 +408,16 @@ func TestIntegrationM2(t *testing.T) {
 	if in, err = c.RemoveSigners(ctx, sign[0].ID, &SignersRequest{Operator: sign[0].Assignee, Users: []string{"s3"}}); err != nil || len(in.ActiveTasks()) != 2 {
 		t.Fatalf("remove signers = %+v, %v", in, err)
 	}
-	for _, task := range in.ActiveTasks() {
+	for i, task := range in.ActiveTasks() {
 		in, err = c.Complete(ctx, task.ID, &CompleteRequest{Operator: task.Assignee, Variables: map[string]any{"approved": true}})
 		if err != nil {
 			t.Fatal(err)
+		}
+		// 已有他人处理过任务，发起人不能撤回（发起人自己完成的“提交”不算）
+		if i == 0 {
+			if _, err := c.Recall(ctx, in.ID, "u1"); !IsCode(err, CodeRecallNotAllowed) {
+				t.Fatalf("recall after a signer: %v", err)
+			}
 		}
 	}
 	result, _ := in.Variables["sign_result"].(map[string]any)
@@ -501,8 +526,14 @@ func TestIntegrationResolver(t *testing.T) {
 	if _, err := c.Signal(ctx, in.ID, &SignalRequest{Message: "refund"}); !IsCode(err, CodeConflict) {
 		t.Fatalf("wrong message: %v", err)
 	}
-	if in, err = c.Signal(ctx, in.ID, &SignalRequest{Message: "paid", Variables: map[string]any{"paid": true}}); err != nil || in.Status != InstanceCompleted {
-		t.Fatalf("signal = %+v, %v", in, err)
+	msgID := "pay-" + strconv.FormatInt(in.ID, 10)
+	r, err := c.SendMessage(ctx, &MessageRequest{InstanceID: in.ID, Message: "paid", MessageID: msgID, Variables: map[string]any{"paid": true}})
+	if err != nil || r.Status != MessageDelivered || r.Instance == nil || r.Instance.Status != InstanceCompleted {
+		t.Fatalf("send message = %+v, %v", r, err)
+	}
+	// 同一 message_id 重复推送不再处理
+	if r, err := c.SendMessage(ctx, &MessageRequest{InstanceID: in.ID, Message: "paid", MessageID: msgID}); err != nil || r.Status != MessageDuplicate {
+		t.Fatalf("duplicate = %+v, %v", r, err)
 	}
 
 	// 签名密钥不对时回调返回 401，推进失败
@@ -562,5 +593,146 @@ func TestIntegrationSubprocess(t *testing.T) {
 	in = wait(in.ID, func(d *InstanceDetail) bool { return !d.Running() })
 	if in.Status != InstanceCompleted || in.Variables["legal_ok"] != true {
 		t.Fatalf("parent = %s %v", in.Status, in.Variables)
+	}
+}
+
+func TestIntegrationForm(t *testing.T) {
+	c, clientPK := setupClient(t)
+	ctx := context.Background()
+	var m struct{ ID int64 }
+	_ = json.Unmarshal(admin(t, http.MethodPost, "/admin/v1/models", map[string]any{
+		"client_id": clientPK, "key": "expense", "name": "报销", "content": json.RawMessage(`{
+		  "form": {"fields": [
+		    {"key": "amount", "label": "金额", "type": "number", "required": true, "min": 0},
+		    {"key": "kind", "label": "类型", "type": "select", "options": [{"value": "travel"}, {"value": "meal"}], "default": "travel"},
+		    {"key": "approved", "label": "同意", "type": "boolean"}
+		  ]},
+		  "nodes": [{"id": "s", "type": "start", "form": {"fields": {"approved": "hidden"}}},
+		    {"id": "t", "type": "user_task", "assignee": "boss", "form": {"fields": {"approved": "edit"}, "required": ["approved"]}},
+		    {"id": "e", "type": "end"}],
+		  "edges": [{"id": "1", "source": "s", "target": "t"}, {"id": "2", "source": "t", "target": "e"}]}`),
+	}), &m)
+	admin(t, http.MethodPost, fmt.Sprintf("/admin/v1/models/%d/publish", m.ID), nil)
+
+	sf, err := c.StartForm(ctx, "expense")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sf.Form == nil || len(sf.Form.Fields) != 2 || sf.Form.Fields[1].Value != "travel" || !sf.Form.Fields[0].Required {
+		t.Fatalf("start form = %+v", sf.Form)
+	}
+	if sf, err := c.StartForm(ctx, "leave"); err != nil || sf.Form != nil {
+		t.Fatalf("leave start form = %+v, %v", sf, err)
+	}
+
+	_, err = c.Start(ctx, &StartRequest{Key: "expense", Starter: "u1", Variables: map[string]any{"amount": -1}})
+	if !IsCode(err, CodeInvalidForm) {
+		t.Fatalf("invalid start err = %v", err)
+	}
+	in, err := c.Start(ctx, &StartRequest{Key: "expense", Starter: "u1", Variables: map[string]any{"amount": 88}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := c.Task(ctx, in.ActiveTasks()[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Form == nil || task.Form.NodeID != "t" || len(task.Form.Fields) != 3 {
+		t.Fatalf("task form = %+v", task.Form)
+	}
+	for _, f := range task.Form.Fields {
+		if f.Key == "approved" && (f.Permission != PermEdit || !f.Required) || f.Key == "amount" && (f.Permission != PermRead || f.Value != 88.0) {
+			t.Fatalf("field = %+v", f)
+		}
+	}
+	_, err = c.Complete(ctx, task.ID, &CompleteRequest{Operator: "boss", Variables: map[string]any{"amount": 1, "approved": true}})
+	if !IsCode(err, CodeInvalidForm) {
+		t.Fatalf("read-only field err = %v", err)
+	}
+	if in, err = c.Complete(ctx, task.ID, &CompleteRequest{Operator: "boss", Variables: map[string]any{"approved": true}}); err != nil || in.Running() {
+		t.Fatalf("complete = %+v, %v", in, err)
+	}
+}
+
+// 审批结果、退回发起人与直接回到、自动通过、汇聚提前结束、附件字段
+func TestIntegrationApproval(t *testing.T) {
+	c, clientPK := setupClient(t)
+	ctx := context.Background()
+	publish := func(key, content string) {
+		t.Helper()
+		var m struct{ ID int64 }
+		_ = json.Unmarshal(admin(t, http.MethodPost, "/admin/v1/models", map[string]any{"client_id": clientPK, "key": key, "name": key, "content": json.RawMessage(content)}), &m)
+		admin(t, http.MethodPost, fmt.Sprintf("/admin/v1/models/%d/publish", m.ID), nil)
+	}
+	publish("approval", `{"auto_pass": {"adjacent": true},
+	  "form": {"fields": [{"key": "files", "label": "附件", "type": "files", "accept": ".pdf"}, {"key": "approved", "label": "同意", "type": "boolean"}]},
+	  "nodes": [{"id": "s", "type": "start", "form": {"fields": {"approved": "hidden"}}},
+	    {"id": "a", "type": "user_task", "assignee": "m1", "form": {"fields": {"approved": "edit"}}},
+	    {"id": "b", "type": "user_task", "assignee": "m1", "form": {"fields": {"approved": "edit"}}},
+	    {"id": "c", "type": "user_task", "assignee": "m2", "form": {"fields": {"approved": "edit"}}},
+	    {"id": "f", "type": "parallel_gateway"}, {"id": "x", "type": "user_task", "assignee": "x1", "form": {"fields": {"approved": "edit"}}},
+	    {"id": "y", "type": "user_task", "assignee": "y1"}, {"id": "j", "type": "parallel_gateway", "complete_when": "approved == false"},
+	    {"id": "g", "type": "exclusive_gateway"}, {"id": "ok", "type": "end", "result": "approved"}, {"id": "no", "type": "end", "result": "rejected"}],
+	  "edges": [{"id": "1", "source": "s", "target": "a"}, {"id": "2", "source": "a", "target": "b"}, {"id": "3", "source": "b", "target": "c"},
+	    {"id": "4", "source": "c", "target": "f"}, {"id": "5", "source": "f", "target": "x"}, {"id": "6", "source": "f", "target": "y"},
+	    {"id": "7", "source": "x", "target": "j"}, {"id": "8", "source": "y", "target": "j"}, {"id": "9", "source": "j", "target": "g"},
+	    {"id": "10", "source": "g", "target": "no", "condition": "approved == false"}, {"id": "11", "source": "g", "target": "ok", "default": true}]}`)
+
+	// 附件：文件信息按 accept 校验
+	if _, err := c.Start(ctx, &StartRequest{Key: "approval", Starter: "u1", Variables: map[string]any{"files": []FileValue{{ID: "f-1", Name: "a.exe"}}}}); !IsCode(err, CodeInvalidForm) {
+		t.Fatalf("bad file err = %v", err)
+	}
+	in, err := c.Start(ctx, &StartRequest{Key: "approval", Starter: "u1", Variables: map[string]any{"files": []FileValue{{ID: "f-1", Name: "合同.pdf", Size: 10}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a、b 同为 m1：b 自动通过
+	in, _ = c.Complete(ctx, in.ActiveTasks()[0].ID, &CompleteRequest{Operator: "m1", Variables: map[string]any{"approved": true}})
+	if tasks := in.ActiveTasks(); len(tasks) != 1 || tasks[0].NodeID != "c" {
+		t.Fatalf("after a = %+v", tasks)
+	}
+	var autoPassed bool
+	for _, ev := range in.Events {
+		autoPassed = autoPassed || (ev.Type == "task_auto_passed" && ev.NodeID == "b" && ev.Operator == "m1")
+	}
+	if !autoPassed {
+		t.Fatalf("b should auto pass: %+v", in.Events)
+	}
+	// 发起人催办 c：间隔内再次催办被拒绝
+	if r, err := c.Urge(ctx, in.ID, "u1", "请尽快审批"); err != nil || len(r.Urged) != 1 || r.Urged[0] != in.ActiveTasks()[0].ID {
+		t.Fatalf("urge = %+v, %v", r, err)
+	}
+	if _, err := c.Urge(ctx, in.ID, "u1", ""); !IsCode(err, CodeTooManyRequests) {
+		t.Fatalf("urge again err = %v", err)
+	}
+	if _, err := c.Urge(ctx, in.ID, "m2", ""); !IsCode(err, CodeNotAssignee) {
+		t.Fatalf("urge by other err = %v", err)
+	}
+	// c 退回发起人并选择直接回到 c
+	targets, err := c.ReturnTargets(ctx, in.ActiveTasks()[0].ID)
+	if err != nil || len(targets) == 0 || !targets[len(targets)-1].Starter || !targets[len(targets)-1].DirectBack {
+		t.Fatalf("targets = %+v, %v", targets, err)
+	}
+	in, err = c.Return(ctx, in.ActiveTasks()[0].ID, &ReturnRequest{Operator: "m2", TargetNode: "s", DirectBack: true})
+	if err != nil || len(in.ActiveTasks()) != 1 || in.ActiveTasks()[0].ResumeNode != "c" || in.ActiveTasks()[0].Assignee != "u1" {
+		t.Fatalf("return = %+v, %v", in.ActiveTasks(), err)
+	}
+	in, _ = c.Complete(ctx, in.ActiveTasks()[0].ID, &CompleteRequest{Operator: "u1"})
+	if tasks := in.ActiveTasks(); len(tasks) != 1 || tasks[0].NodeID != "c" {
+		t.Fatalf("direct back = %+v", tasks)
+	}
+	// 并行：x 不同意，y 的待办取消，实例结果为 rejected
+	in, _ = c.Complete(ctx, in.ActiveTasks()[0].ID, &CompleteRequest{Operator: "m2", Variables: map[string]any{"approved": true}})
+	for _, tk := range in.ActiveTasks() {
+		if tk.NodeID == "x" {
+			in, err = c.Complete(ctx, tk.ID, &CompleteRequest{Operator: "x1", Variables: map[string]any{"approved": false}})
+		}
+	}
+	if err != nil || in.Status != InstanceCompleted || in.Result != "rejected" || len(in.ActiveTasks()) != 0 {
+		t.Fatalf("veto = %s %q %+v, %v", in.Status, in.Result, in.ActiveTasks(), err)
+	}
+	page, err := c.Instances(ctx, &InstanceQuery{Key: "approval", Result: "rejected"})
+	if err != nil || page.Total != 1 {
+		t.Fatalf("instances by result = %+v, %v", page, err)
 	}
 }

@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Paginate 按偏移量分页一个已排序的完整列表（数据量小、可一次读出时使用；token 为不透明的偏移量编码）
@@ -31,6 +33,37 @@ func Paginate[T any](all []T, p PageRequest) (*Page[T], error) {
 		out.Items = all[offset:end]
 		if end < len(all) {
 			out.NextPageToken = base64.RawURLEncoding.EncodeToString([]byte("o:" + strconv.Itoa(end)))
+		}
+	}
+	return out, nil
+}
+
+// SyncPaginate 导出接口的分页：offset 与导出开始时间 asOf 编码进 token，翻页时 AsOf 保持不变；首页的 asOf 取 now
+func SyncPaginate[T any](all []T, p PageRequest, now time.Time) (*SyncPage[T], error) {
+	offset, asOf := 0, now.UTC()
+	if p.Token != "" {
+		raw, err := base64.RawURLEncoding.DecodeString(p.Token)
+		parts := strings.Split(string(raw), ":")
+		if err != nil || len(parts) != 3 || parts[0] != "s" {
+			return nil, BadRequest("page_token 无效")
+		}
+		n, err1 := strconv.Atoi(parts[1])
+		ns, err2 := strconv.ParseInt(parts[2], 10, 64)
+		if err1 != nil || err2 != nil || n < 0 {
+			return nil, BadRequest("page_token 无效")
+		}
+		offset, asOf = n, time.Unix(0, ns).UTC()
+	}
+	size := p.Size
+	if size <= 0 {
+		size = DefaultPageSize
+	}
+	out := &SyncPage[T]{Items: []T{}, AsOf: asOf}
+	if offset < len(all) {
+		end := min(offset+size, len(all))
+		out.Items = all[offset:end]
+		if end < len(all) {
+			out.NextPageToken = base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("s:%d:%d", end, asOf.UnixNano())))
 		}
 	}
 	return out, nil
@@ -70,11 +103,14 @@ type Static struct {
 	depts    map[string]Department
 	roles    map[string]Role
 	members  map[string][]string
+	// loadedAt 数据载入时间，作为全部记录的 updated_at（内存数据不变化）
+	loadedAt time.Time
 }
 
 // NewStatic 由数据构造内存目录；Status 为空的用户视为在职
 func NewStatic(d *StaticData) *Static {
-	s := &Static{users: map[string]User{}, managers: map[string]string{}, depts: map[string]Department{}, roles: map[string]Role{}, members: map[string][]string{}}
+	s := &Static{users: map[string]User{}, managers: map[string]string{}, depts: map[string]Department{}, roles: map[string]Role{}, members: map[string][]string{},
+		loadedAt: time.Now().UTC()}
 	for _, u := range d.Users {
 		if u.Status == "" {
 			u.Status = StatusActive
@@ -266,4 +302,44 @@ func (s *Static) SearchUsers(_ context.Context, keyword, dept string, p PageRequ
 		list = kept
 	}
 	return Paginate(list, p)
+}
+
+// changed 数据自 since 起是否有变化（内存数据只在载入时变化）
+func (s *Static) changed(since time.Time) bool { return since.IsZero() || !s.loadedAt.Before(since) }
+
+func (s *Static) SyncUsers(_ context.Context, since time.Time, p PageRequest) (*SyncPage[SyncUser], error) {
+	var list []SyncUser
+	if s.changed(since) {
+		for _, id := range s.order {
+			list = append(list, SyncUser{User: s.users[id], ManagerID: s.managers[id], UpdatedAt: s.loadedAt})
+		}
+	}
+	return SyncPaginate(list, p, time.Now())
+}
+
+func (s *Static) SyncDepartments(_ context.Context, since time.Time, p PageRequest) (*SyncPage[SyncDepartment], error) {
+	var list []SyncDepartment
+	if s.changed(since) {
+		for _, d := range s.depts {
+			d.Path = s.pathOf(d.ID)
+			list = append(list, SyncDepartment{Department: d, UpdatedAt: s.loadedAt})
+		}
+		sort.Slice(list, func(i, j int) bool { return list[i].ID < list[j].ID })
+	}
+	return SyncPaginate(list, p, time.Now())
+}
+
+func (s *Static) SyncRoles(_ context.Context, since time.Time, p PageRequest) (*SyncPage[SyncRole], error) {
+	var list []SyncRole
+	if s.changed(since) {
+		for code, r := range s.roles {
+			members := s.members[code]
+			if members == nil {
+				members = []string{}
+			}
+			list = append(list, SyncRole{Role: r, MemberIDs: members, UpdatedAt: s.loadedAt})
+		}
+		sort.Slice(list, func(i, j int) bool { return list[i].Code < list[j].Code })
+	}
+	return SyncPaginate(list, p, time.Now())
 }
