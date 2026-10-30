@@ -19,6 +19,9 @@ const (
 	EventInstanceStarted   = "instance.started"
 	EventInstanceCompleted = "instance.completed"
 	EventInstanceCanceled  = "instance.canceled"
+	// EventInstanceSuspended / EventInstanceResumed 实例被挂起、恢复（Comment 为原因）
+	EventInstanceSuspended = "instance.suspended"
+	EventInstanceResumed   = "instance.resumed"
 	EventTaskCreated       = "task.created"
 	EventTaskCompleted     = "task.completed"
 	EventTaskCanceled      = "task.canceled"

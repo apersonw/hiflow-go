@@ -89,3 +89,27 @@ func TestWebhookHandler(t *testing.T) {
 		t.Fatalf("unsigned code = %d", rec.Code)
 	}
 }
+
+func TestCallbackHandlerAnswersTest(t *testing.T) {
+	called := false
+	h := CallbackHandler("cs", func(*http.Request, *WebhookEvent) (any, error) {
+		called = true
+		return nil, errors.New("unknown")
+	})
+	body := `{"id":"e1","type":"callback.test","created_at":"2026-10-20T07:00:00Z","data":{"client_id":"hf_x"}}`
+	req := httptest.NewRequest(http.MethodPost, "/cb", strings.NewReader(body))
+	req.Header.Set(SignatureHeader, signFor("cs", time.Now().Unix(), body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || called {
+		t.Fatalf("code = %d, called = %v", rec.Code, called)
+	}
+	// 签名不符仍返回 401，便于在管理后台发现密钥配置错误
+	req = httptest.NewRequest(http.MethodPost, "/cb", strings.NewReader(body))
+	req.Header.Set(SignatureHeader, signFor("other", time.Now().Unix(), body))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("bad signature code = %d", rec.Code)
+	}
+}

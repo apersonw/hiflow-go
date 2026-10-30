@@ -50,8 +50,12 @@ const (
 	// CodeRecallNotAllowed 已有任务被处理，不能撤回
 	CodeRecallNotAllowed = 40905
 	// CodeNothingToUrge 实例中没有进行中的人工待办可催办
-	CodeNothingToUrge   = 40906
-	CodePayloadTooLarge = 41301
+	CodeNothingToUrge = 40906
+	// CodeBusinessKeyRunning 流程设置了“同一业务主键只允许一个进行中的实例”，该业务主键已有进行中的实例（消息中带实例 ID）
+	CodeBusinessKeyRunning = 40907
+	// CodeInstanceSuspended 实例已挂起，恢复后才能处理任务、撤回、催办
+	CodeInstanceSuspended = 40908
+	CodePayloadTooLarge   = 41301
 	// CodeEvaluate 流程推进失败（排他网关没有满足条件的出口等），通常是流程变量缺失
 	CodeEvaluate        = 42201
 	CodeTooManyRequests = 42901

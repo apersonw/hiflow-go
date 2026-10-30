@@ -64,6 +64,9 @@ func (c *Client) Instances(ctx context.Context, q *InstanceQuery) (*Page[Instanc
 		if q.Archived {
 			v.Set("archived", "true")
 		}
+		if q.Suspended {
+			v.Set("suspended", "true")
+		}
 		setInt(v, "page", int64(q.Page))
 		setInt(v, "page_size", int64(q.PageSize))
 	}
@@ -116,6 +119,42 @@ func (c *Client) Urge(ctx context.Context, id int64, operator, comment string) (
 	return &out, nil
 }
 
+// UpdateBusinessKey 修改进行中实例的业务主键（如先用临时单号发起、之后换成正式单号），businessKey 为空表示清除；
+// 子流程一并更新，内置变量 ${business_key} 同步更新。子流程实例不能单独修改；
+// 流程设置了业务主键唯一且新值已有进行中的实例时返回 CodeBusinessKeyRunning
+func (c *Client) UpdateBusinessKey(ctx context.Context, id int64, businessKey, operator string) (*InstanceDetail, error) {
+	b, err := json.Marshal(map[string]string{"business_key": businessKey, "operator": operator})
+	if err != nil {
+		return nil, fmt.Errorf("hiflow: encode request: %w", err)
+	}
+	var out InstanceDetail
+	// 设为同一个值是幂等的：网络失败可以安全重试
+	r := &request{method: http.MethodPut, path: "/open/v1/instances/" + strconv.FormatInt(id, 10) + "/business-key", body: b, idempotent: true}
+	if err := c.call(ctx, r, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Suspend 挂起实例（如业务争议冻结单据）：挂起期间不能处理任务、撤回、催办（返回 CodeInstanceSuspended），
+// 定时器、超时、服务任务暂停，子流程一并挂起；reason 必填。只能挂起顶层实例
+func (c *Client) Suspend(ctx context.Context, id int64, reason, operator string) (*InstanceDetail, error) {
+	var out InstanceDetail
+	if err := c.post(ctx, "/open/v1/instances/"+strconv.FormatInt(id, 10)+"/suspend", map[string]string{"reason": reason, "operator": operator}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Resume 恢复挂起的实例：到期的定时器、超时与服务任务随后执行
+func (c *Client) Resume(ctx context.Context, id int64, reason, operator string) (*InstanceDetail, error) {
+	var out InstanceDetail
+	if err := c.post(ctx, "/open/v1/instances/"+strconv.FormatInt(id, 10)+"/resume", map[string]string{"reason": reason, "operator": operator}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Signal 向实例发送消息：完成等待该消息（节点 message）的接收任务，变量合并后继续推进；
 // 没有等待该消息的接收任务时返回 409（CodeConflict）
 func (c *Client) Signal(ctx context.Context, instanceID int64, req *SignalRequest) (*InstanceDetail, error) {
@@ -128,7 +167,8 @@ func (c *Client) Signal(ctx context.Context, instanceID int64, req *SignalReques
 
 // SendMessage 发送消息（快递状态推送等）：按实例 ID 或业务主键找到等待该消息的实例并投递；
 // 带 MessageID 时去重（重复返回 MessageDuplicate，失败可安全重试），带 TTL 时暂时无人等待的消息会缓存（MessageBuffered）。
-// 同一业务主键有多个实例在等待时返回 CodeConflict，请指定 Key 或 InstanceID
+// 同一业务主键有多个实例在等待时返回 CodeConflict，请指定 Key 或 InstanceID。
+// 没有实例在等待、而有流程的开始节点以该消息启动时发起新实例（MessageStarted），此时 InstanceID 与 BusinessKey 都可以为空
 func (c *Client) SendMessage(ctx context.Context, req *MessageRequest) (*MessageResult, error) {
 	b, err := json.Marshal(req)
 	if err != nil {
@@ -151,6 +191,7 @@ func (c *Client) Tasks(ctx context.Context, q *TaskQuery) (*Page[Task], error) {
 		set(v, "user", q.User)
 		set(v, "assignee", q.Assignee)
 		set(v, "keyword", q.Keyword)
+		set(v, "business_key", q.BusinessKey)
 		setInt(v, "page", int64(q.Page))
 		setInt(v, "page_size", int64(q.PageSize))
 	}
@@ -247,6 +288,7 @@ func (c *Client) CCs(ctx context.Context, q *CCQuery) (*Page[CC], error) {
 	if q != nil {
 		set(v, "user", q.User)
 		setInt(v, "instance_id", q.InstanceID)
+		set(v, "business_key", q.BusinessKey)
 		if q.Unread {
 			v.Set("unread", "true")
 		}

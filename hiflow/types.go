@@ -65,6 +65,9 @@ type Instance struct {
 	ParentInstanceID *int64 `json:"parent_instance_id"`
 	ParentTaskID     *int64 `json:"parent_task_id"`
 	Depth            int    `json:"depth"`
+	// SuspendedAt 挂起时间（为空表示未挂起）：挂起期间不能处理任务，定时器、超时、服务任务暂停
+	SuspendedAt   *time.Time `json:"suspended_at"`
+	SuspendReason string     `json:"suspend_reason"`
 }
 
 // Running 实例是否仍在进行
@@ -207,12 +210,16 @@ type Event struct {
 	// Type instance_started | node_entered | task_created | task_completed | task_canceled | task_transferred | task_returned
 	// | task_overdue | task_auto_passed（按模型的自动通过规则直接通过，Operator 为处理人）| cc | signers_added | signers_removed
 	// | service_failed | node_skipped | instance_completed | instance_canceled | instance_recalled
-	Type      string    `json:"type"`
-	TaskID    *int64    `json:"task_id"`
-	NodeID    string    `json:"node_id"`
-	Operator  string    `json:"operator"`
-	Comment   string    `json:"comment"`
-	CreatedAt time.Time `json:"created_at"`
+	// | instance_suspended | instance_resumed | node_jumped | variables_updated | business_key_changed
+	// | variables_changed（流程变量变化，Data 为 {"changes": [{name, old, new, added, removed}]}）
+	Type     string `json:"type"`
+	TaskID   *int64 `json:"task_id"`
+	NodeID   string `json:"node_id"`
+	Operator string `json:"operator"`
+	Comment  string `json:"comment"`
+	// Data 结构化数据（variables_changed 的变量前后值），其它事件为空
+	Data      json.RawMessage `json:"data,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
 }
 
 // Page 分页结果
@@ -313,16 +320,18 @@ const (
 	MessageDelivered = "delivered"
 	MessageBuffered  = "buffered"
 	MessageDuplicate = "duplicate"
+	// MessageStarted 没有实例在等待，按开始节点的启动消息发起了新实例
+	MessageStarted = "started"
 )
 
 // MessageResult 发送消息的结果
 type MessageResult struct {
-	// Status delivered 已投递、buffered 已缓存等待投递、duplicate 同一 message_id 已处理过
+	// Status delivered 已投递、buffered 已缓存等待投递、duplicate 同一 message_id 已处理过、started 按消息启动发起了新实例
 	Status     string `json:"status"`
 	InstanceID int64  `json:"instance_id,omitempty"`
 	TaskID     int64  `json:"task_id,omitempty"`
 	MessageID  string `json:"message_id,omitempty"`
-	// Instance 投递后的实例详情（只在 delivered 时返回）
+	// Instance 投递后（或新发起）的实例详情（只在 delivered、started 时返回）
 	Instance *InstanceDetail `json:"instance,omitempty"`
 }
 
@@ -396,6 +405,8 @@ type CCQuery struct {
 	// User 被抄送人（“抄送我的”）
 	User       string
 	InstanceID int64
+	// BusinessKey 所属实例的业务主键
+	BusinessKey string
 	// Unread 只看未读
 	Unread   bool
 	Page     int
@@ -427,8 +438,10 @@ type InstanceQuery struct {
 	Keyword string
 	// Archived 查询已归档的实例（服务端开启归档后，结束较久的实例只在归档中）
 	Archived bool
-	Page     int
-	PageSize int
+	// Suspended 只看挂起的实例
+	Suspended bool
+	Page      int
+	PageSize  int
 }
 
 // TaskQuery 任务列表查询条件
@@ -440,6 +453,8 @@ type TaskQuery struct {
 	User     string
 	Assignee string
 	Keyword  string
-	Page     int
-	PageSize int
+	// BusinessKey 所属实例的业务主键（含沿用父流程业务主键的子流程），如单据详情页显示该单据的待办
+	BusinessKey string
+	Page        int
+	PageSize    int
 }

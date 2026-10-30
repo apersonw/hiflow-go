@@ -13,6 +13,8 @@ const (
 	CallbackResolveUsers = "resolve.users"
 	// CallbackServiceInvoke 服务任务调用：响应 ServiceResponse，失败（非 2xx）时 HiFlow 退避重试
 	CallbackServiceInvoke = "service.invoke"
+	// CallbackTest 管理后台“测试回调地址”发送的探测请求，返回 2xx 即视为连通（CallbackHandler 自动应答）
+	CallbackTest = "callback.test"
 )
 
 // ServiceRequest 服务任务调用请求；同一任务可能被调用多次（重试），请按 TaskID 保证幂等
@@ -73,6 +75,7 @@ func (e *WebhookEvent) Resolve() (*ResolveRequest, error) {
 
 // CallbackHandler 返回处理 HiFlow 回调的 http.Handler：校验签名（secret 为客户端密钥）后调用 fn，把返回值编码为 JSON 响应；
 // 签名无效返回 401，fn 返回错误时返回 500（HiFlow 的本次推进失败并回滚）。
+// 管理后台的测试请求（callback.test）在签名校验通过后直接返回 200，不调用 fn。
 //
 //	http.Handle("/hiflow/callback", hiflow.CallbackHandler(clientSecret, func(r *http.Request, e *hiflow.WebhookEvent) (any, error) {
 //		req, err := e.Resolve()
@@ -99,6 +102,11 @@ func CallbackHandler(secret string, fn func(r *http.Request, e *WebhookEvent) (a
 		e, err := VerifyWebhook(secret, r.Header.Get(SignatureHeader), body, 0)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+		if e.Type == CallbackTest {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte("{}\n"))
 			return
 		}
 		out, err := fn(r, e)
