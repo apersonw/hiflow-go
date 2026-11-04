@@ -182,10 +182,34 @@ func (c *Client) SendMessage(ctx context.Context, req *MessageRequest) (*Message
 	return &out, nil
 }
 
+// BroadcastSignal 广播信号（如法规更新）：投递给本客户端内此刻等待它的全部任务，后台分批执行；
+// 之后才开始等待的不会收到，挂起的实例不投递。返回投递进度，可用 SignalProgress 查询
+func (c *Client) BroadcastSignal(ctx context.Context, req *BroadcastRequest) (*Signal, error) {
+	b, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("hiflow: encode request: %w", err)
+	}
+	var out Signal
+	if err := c.call(ctx, &request{method: http.MethodPost, path: "/open/v1/signals", body: b}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SignalProgress 信号的投递进度
+func (c *Client) SignalProgress(ctx context.Context, id int64) (*Signal, error) {
+	var out Signal
+	if err := c.get(ctx, "/open/v1/signals/"+strconv.FormatInt(id, 10), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Tasks 查询一页任务
 func (c *Client) Tasks(ctx context.Context, q *TaskQuery) (*Page[Task], error) {
 	v := url.Values{}
 	if q != nil {
+		set(v, "sort", q.Sort)
 		setInt(v, "instance_id", q.InstanceID)
 		set(v, "status", q.Status)
 		set(v, "user", q.User)

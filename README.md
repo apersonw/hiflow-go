@@ -124,3 +124,7 @@ http.Handle("/hiflow/v1/", http.StripPrefix("/hiflow/v1", h)) // 签名中的 Pa
 go test ./...                                                     # 单元测试
 HIFLOW_ADMIN_API_KEY=xxx go test -tags=integration -v ./...       # 端到端（需服务已启动）
 ```
+
+## 拉模式 Worker
+
+服务任务 `mode: pull` 按 topic 领取，支持完成、失败退避、续租和 BPMN 错误。SDK Worker 提供并发上限、自动续租及停止处理；业务处理函数必须响应取消，并按任务ID保证副作用幂等。配置与示例见后端仓库 `docs/m8-integrations.md`。

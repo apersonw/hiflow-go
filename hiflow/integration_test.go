@@ -107,7 +107,7 @@ func setupClient(t *testing.T) (*Client, int64) {
 		_ = json.Unmarshal(admin(t, http.MethodPost, "/admin/v1/models", map[string]any{
 			"client_id": client.ID, "key": key, "name": key, "content": json.RawMessage(content),
 		}), &m)
-		admin(t, http.MethodPost, fmt.Sprintf("/admin/v1/models/%d/publish", m.ID), nil)
+		admin(t, http.MethodPost, fmt.Sprintf("/admin/v1/models/%d/publish?skip_tests=true&reason=legacy-fixture", m.ID), nil)
 	}
 	c, err := New(baseURL(), client.ClientID, client.ClientSecret)
 	if err != nil {
@@ -351,7 +351,7 @@ func TestIntegrationM2(t *testing.T) {
 	_ = json.Unmarshal(admin(t, http.MethodPost, "/admin/v1/models", map[string]any{
 		"client_id": clientPK, "key": "review", "name": "评审", "content": json.RawMessage(reviewModel),
 	}), &m)
-	admin(t, http.MethodPost, fmt.Sprintf("/admin/v1/models/%d/publish", m.ID), nil)
+	admin(t, http.MethodPost, fmt.Sprintf("/admin/v1/models/%d/publish?skip_tests=true&reason=legacy-fixture", m.ID), nil)
 	vars := map[string]any{"starter": "u1", "signers": []any{"s1", "s2"}}
 
 	// 撤回：还没有人处理
@@ -494,7 +494,7 @@ func TestIntegrationResolver(t *testing.T) {
 			{"id":"wait","type":"receive_task","message":"paid"},{"id":"e","type":"end"}],
 			"edges":[{"id":"1","source":"s","target":"mgr"},{"id":"2","source":"mgr","target":"svc"},{"id":"3","source":"svc","target":"wait"},{"id":"4","source":"wait","target":"e"}]}`),
 	}), &m)
-	admin(t, http.MethodPost, fmt.Sprintf("/admin/v1/models/%d/publish", m.ID), nil)
+	admin(t, http.MethodPost, fmt.Sprintf("/admin/v1/models/%d/publish?skip_tests=true&reason=legacy-fixture", m.ID), nil)
 
 	c, err := New(baseURL(), client.ClientID, client.ClientSecret)
 	if err != nil {
@@ -557,7 +557,7 @@ func TestIntegrationSubprocess(t *testing.T) {
 		_ = json.Unmarshal(admin(t, http.MethodPost, "/admin/v1/models", map[string]any{
 			"client_id": clientPK, "key": key, "name": key, "content": json.RawMessage(content),
 		}), &m)
-		admin(t, http.MethodPost, fmt.Sprintf("/admin/v1/models/%d/publish", m.ID), nil)
+		admin(t, http.MethodPost, fmt.Sprintf("/admin/v1/models/%d/publish?skip_tests=true&reason=legacy-fixture", m.ID), nil)
 	}
 	wait := func(id int64, done func(*InstanceDetail) bool) *InstanceDetail {
 		t.Helper()
@@ -612,7 +612,7 @@ func TestIntegrationForm(t *testing.T) {
 		    {"id": "e", "type": "end"}],
 		  "edges": [{"id": "1", "source": "s", "target": "t"}, {"id": "2", "source": "t", "target": "e"}]}`),
 	}), &m)
-	admin(t, http.MethodPost, fmt.Sprintf("/admin/v1/models/%d/publish", m.ID), nil)
+	admin(t, http.MethodPost, fmt.Sprintf("/admin/v1/models/%d/publish?skip_tests=true&reason=legacy-fixture", m.ID), nil)
 
 	sf, err := c.StartForm(ctx, "expense")
 	if err != nil {
@@ -662,7 +662,7 @@ func TestIntegrationApproval(t *testing.T) {
 		t.Helper()
 		var m struct{ ID int64 }
 		_ = json.Unmarshal(admin(t, http.MethodPost, "/admin/v1/models", map[string]any{"client_id": clientPK, "key": key, "name": key, "content": json.RawMessage(content)}), &m)
-		admin(t, http.MethodPost, fmt.Sprintf("/admin/v1/models/%d/publish", m.ID), nil)
+		admin(t, http.MethodPost, fmt.Sprintf("/admin/v1/models/%d/publish?skip_tests=true&reason=legacy-fixture", m.ID), nil)
 	}
 	publish("approval", `{"auto_pass": {"adjacent": true},
 	  "form": {"fields": [{"key": "files", "label": "附件", "type": "files", "accept": ".pdf"}, {"key": "approved", "label": "同意", "type": "boolean"}]},

@@ -38,7 +38,8 @@ const (
 	// EventTaskAssigneeInactive 待办的处理人在组织架构中已停用或不存在（每个待办一次，之后按目录配置交接）
 	EventTaskAssigneeInactive = "task.assignee_inactive"
 	// EventTaskUrged 发起人催办（每个被催办的待办一条，Comment 为催办说明），由业务系统通知处理人
-	EventTaskUrged = "task.urged"
+	EventTaskUrged     = "task.urged"
+	EventTaskCommented = "task.commented"
 	// EventWebhookTest 管理后台“测试推送”
 	EventWebhookTest = "webhook.test"
 )
@@ -84,9 +85,12 @@ type EventInstance struct {
 
 // EventTask 事件中的任务
 type EventTask struct {
-	ID     int64  `json:"id"`
-	NodeID string `json:"node_id"`
-	Name   string `json:"name"`
+	ReturnTo   string     `json:"return_to"`
+	Priority   int        `json:"priority"`
+	FollowUpAt *time.Time `json:"follow_up_at"`
+	ID         int64      `json:"id"`
+	NodeID     string     `json:"node_id"`
+	Name       string     `json:"name"`
 	// Kind user | service | receive
 	Kind     string `json:"kind"`
 	Assignee string `json:"assignee"`
@@ -110,11 +114,12 @@ type EventCC struct {
 
 // EventData 流程事件的数据：Instance 总是有，Task 在 task.* 与 cc.created 事件中有，CC 只在 cc.created 中有；Operator / Comment 为触发事件的操作者与意见
 type EventData struct {
-	Instance EventInstance `json:"instance"`
-	Task     *EventTask    `json:"task"`
-	CC       *EventCC      `json:"cc"`
-	Operator string        `json:"operator"`
-	Comment  string        `json:"comment"`
+	TaskComment *TaskComment  `json:"task_comment"`
+	Instance    EventInstance `json:"instance"`
+	Task        *EventTask    `json:"task"`
+	CC          *EventCC      `json:"cc"`
+	Operator    string        `json:"operator"`
+	Comment     string        `json:"comment"`
 }
 
 // Flow 解析流程事件（instance.* / task.* / cc.*）的数据

@@ -97,10 +97,13 @@ func (d *InstanceDetail) ActiveTasks() []Task {
 
 // Task 人工任务
 type Task struct {
-	ID         int64  `json:"id"`
-	InstanceID int64  `json:"instance_id"`
-	NodeID     string `json:"node_id"`
-	Name       string `json:"name"`
+	Priority   int        `json:"priority"`
+	FollowUpAt *time.Time `json:"follow_up_at"`
+	ReturnTo   string     `json:"return_to"`
+	ID         int64      `json:"id"`
+	InstanceID int64      `json:"instance_id"`
+	NodeID     string     `json:"node_id"`
+	Name       string     `json:"name"`
 	// Kind 任务种类：TaskKindUser 人工任务、TaskKindService 服务任务（引擎回调业务系统执行）、TaskKindReceive 接收任务（等待 Signal）、
 	// TaskKindTimer 定时器、TaskKindSubprocess 子流程
 	Kind string `json:"kind"`
@@ -315,6 +318,27 @@ type MessageRequest struct {
 	Variables map[string]any `json:"variables,omitempty"`
 }
 
+// BroadcastRequest 广播信号：投递给本客户端内此刻等待该信号（消息名）的全部接收任务、边界事件与事件子流程监听
+type BroadcastRequest struct {
+	Name string `json:"name"`
+	// Key 只投递给该流程的实例
+	Key       string         `json:"key,omitempty"`
+	Operator  string         `json:"operator,omitempty"`
+	Variables map[string]any `json:"variables,omitempty"`
+}
+
+// Signal 信号的投递进度（后台分批投递）
+type Signal struct {
+	ID int64 `json:"id"`
+	// Total 创建时等待该信号的任务数
+	Total     int `json:"total"`
+	Position  int `json:"position"`
+	Succeeded int `json:"succeeded"`
+	Failed    int `json:"failed"`
+	// Status running 投递中、completed 已完成、canceled 已停止
+	Status string `json:"status"`
+}
+
 // 消息的处理结果
 const (
 	MessageDelivered = "delivered"
@@ -421,6 +445,7 @@ type CancelRequest struct {
 
 // TransferRequest 转办
 type TransferRequest struct {
+	Mode     string `json:"mode,omitempty"`
 	Operator string `json:"operator"`
 	To       string `json:"to"`
 	Comment  string `json:"comment,omitempty"`
@@ -446,6 +471,7 @@ type InstanceQuery struct {
 
 // TaskQuery 任务列表查询条件
 type TaskQuery struct {
+	Sort       string
 	InstanceID int64
 	// Status active | completed | canceled
 	Status string
